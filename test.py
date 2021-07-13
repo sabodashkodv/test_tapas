@@ -9,7 +9,8 @@ from tapas.utils import tf_example_utils
 from tapas.protos import interaction_pb2
 from tapas.utils import number_annotation_utils, tasks
 from tapas.scripts import prediction_utils
-from tapas.run_task_main import _train_and_predict, TpuOptions, Mode
+from tapas.run_task_main import TpuOptions
+from tapas_fixes import _train_and_predict, Mode
 
 TASK = tasks.Task
 
