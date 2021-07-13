@@ -3,6 +3,7 @@ import dataclasses
 import pandas as pd
 import csv
 import tensorflow.compat.v1 as tf
+from tabulate import tabulate
 from absl import logging
 from tapas.protos import interaction_pb2
 from tapas.scripts import prediction_utils
@@ -13,7 +14,8 @@ def show_answer(table, queries):
     results_path = "results/sqa/model/test_sequence.tsv"
     all_coordinates = list()
     df = pd.DataFrame(table[1:], columns=table[0])
-    print(df)
+    pdtabulate = lambda df: tabulate(df, headers='keys')
+    print(pdtabulate(df))
     print()
     with open(results_path) as csvfile:
         reader = csv.DictReader(csvfile, delimiter='\t')
