@@ -1,28 +1,24 @@
-import tensorflow.compat.v1 as tf
 import os
 import shutil
-import csv
-import pandas as pd
 
 import time
-from tapas.utils import tf_example_utils
-from tapas.protos import interaction_pb2
-from tapas.utils import number_annotation_utils, tasks
-from tapas.scripts import prediction_utils
+from tapas.utils import tf_example_utils, tasks
 from tapas.run_task_main import TpuOptions
-from tapas_fixes import _train_and_predict, Mode
 
-TASK = tasks.Task
+from tapas_component.component import make_prediction, model_preparation
+from tapas_component.utils import convert_interactions_to_examples, write_tf_example, show_answer
 
 model_root = 'tapas_sqa_small'
 
 os.makedirs('results/sqa/tf_examples', exist_ok=True)
 os.makedirs('results/sqa/model', exist_ok=True)
+
 with open('results/sqa/model/checkpoint', 'w') as f:
     f.write('model_checkpoint_path: "model.ckpt-0"')
 for suffix in ['.data-00000-of-00001', '.index', '.meta']:
     shutil.copyfile(f'{model_root}/model.ckpt{suffix}', f'results/sqa/model/model.ckpt-0{suffix}')
 
+task = tasks.Task.SQA
 max_seq_length = 512
 vocab_file = f"{model_root}/vocab.txt"
 config = tf_example_utils.ClassifierConversionConfig(
@@ -36,42 +32,13 @@ config = tf_example_utils.ClassifierConversionConfig(
 converter = tf_example_utils.ToClassifierTensorflowExample(config)
 
 
-def convert_interactions_to_examples(tables_and_queries):
-    """Calls Tapas converter to convert interaction to example."""
-    for idx, (table, queries) in enumerate(tables_and_queries):
-        interaction = interaction_pb2.Interaction()
-        for position, query in enumerate(queries):
-            question = interaction.questions.add()
-            question.original_text = query
-            question.id = f"{idx}-0_{position}"
-        for header in table[0]:
-            interaction.table.columns.add().text = header
-        for line in table[1:]:
-            row = interaction.table.rows.add()
-            for cell in line:
-                row.cells.add().text = cell
-        number_annotation_utils.add_numeric_values(interaction)
-        for i in range(len(interaction.questions)):
-            try:
-                yield converter.convert(interaction, i)
-            except ValueError as e:
-                print(f"Can't convert interaction: {interaction.id} error: {e}")
-
-
-def write_tf_example(filename, examples):
-    with tf.io.TFRecordWriter(filename) as writer:
-        for example in examples:
-            writer.write(example.SerializeToString())
-
-
-def predict(table_data, queries):
+def predict(table_data, queries, task, converter):
     table = [list(map(lambda s: s.strip(), row.split("|")))
              for row in table_data.split("\n") if row.strip()]
-    examples = convert_interactions_to_examples([(table, queries)])
+    examples = convert_interactions_to_examples([(table, queries)], converter)
     write_tf_example("results/sqa/tf_examples/test.tfrecord", examples)
     write_tf_example("results/sqa/tf_examples/random-split-1-dev.tfrecord", [])
 
-    task = TASK.SQA
     output_dir = os.path.join('results', task.name.lower())
     model_dir = os.path.join(output_dir, 'model')
 
@@ -83,38 +50,25 @@ def predict(table_data, queries):
         master=None,
         num_tpu_cores=8,
         iterations_per_loop=1000)
-    _train_and_predict(
-        task=task,
-        tpu_options=tpu_options,
-        test_batch_size=len(queries),
-        train_batch_size=None,
-        gradient_accumulation_steps=1,
-        bert_config_file=f"{model_root}/bert_config.json",
-        init_checkpoint=f"{model_root}/model.ckpt",
-        test_mode=False,
-        mode=Mode.PREDICT,
-        output_dir=output_dir,
-        model_dir=model_dir,
-        loop_predict=False,
-    )
-    results_path = "results/sqa/model/test_sequence.tsv"
-    all_coordinates = []
-    df = pd.DataFrame(table[1:], columns=table[0])
-    print(df)
-    print()
-    with open(results_path) as csvfile:
-        reader = csv.DictReader(csvfile, delimiter='\t')
-        for row in reader:
-            coordinates = prediction_utils.parse_coordinates(row["answer_coordinates"])
-            all_coordinates.append(coordinates)
-            answers = ', '.join([table[row + 1][col] for row, col in coordinates])
-            position = int(row['position'])
-            print(">", queries[position])
-            print(answers)
-    return all_coordinates
+    start_model_preparation = time.time()
+    estimator, task, model_dir, tapas_config, do_model_classification, do_model_aggregation, \
+    use_answer_as_supervision = model_preparation(task,
+                                                  tpu_options,
+                                                  test_batch_size=len(queries),
+                                                  train_batch_size=None,
+                                                  gradient_accumulation_steps=1,
+                                                  bert_config_file=f"{model_root}/bert_config.json",
+                                                  init_checkpoint=f"{model_root}/model.ckpt",
+                                                  test_mode=False,
+                                                  model_dir=model_dir)
+    print(f'{model_root} model_preparation take {time.time() - start_model_preparation} seconds')
+    start_model_predict = time.time()
+    make_prediction(estimator, task, False, model_dir, output_dir, tapas_config, do_model_classification,
+                    do_model_aggregation, use_answer_as_supervision, do_eval=False)
+    print(f'{model_root} model_prediction take {time.time() - start_model_predict} seconds')
 
+    return show_answer(table, queries)
 
-start = time.time()
 
 result = predict("""
 Pos | No | Driver               | Team                           | Laps | Time/Retired | Grid | Points
@@ -139,5 +93,4 @@ Pos | No | Driver               | Team                           | Laps | Time/R
 19  | 5  | Rodolfo Lavin        | Walker Racing                  | 10   | Mechanical   | 16   | 0
 """, ["what were the drivers names?",
       "of these, which points did patrick carpentier and bruno junqueira score?",
-      "who scored higher?"])
-print(f'{model_root} run {time.time() - start}')
+      "who scored higher?"], task, converter)
